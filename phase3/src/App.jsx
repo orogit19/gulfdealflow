@@ -2061,11 +2061,31 @@ function CompanyModal({ companyName, onClose }) {
   );
 }
 
+// Accepts both YYYY-MM-DD and YYYY-MM. For month-only dates the deal could
+// have happened anywhere in that month, so we use the most generous read
+// (end of month) — except for the current month, where end-of-month is in
+// the future and would be wrongly rejected; clamp to today in that case.
+// Computed against today every render so the badge appears/disappears
+// automatically with no manual intervention.
 function isRecentDeal(dateStr) {
-  if (!dateStr || !/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) return false;
-  const dealTime = Date.parse(dateStr);
+  if (!dateStr) return false;
+  const now = Date.now();
+  let dealTime;
+  const fullMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr);
+  const monthMatch = !fullMatch && /^(\d{4})-(\d{2})$/.exec(dateStr);
+  if (fullMatch) {
+    dealTime = Date.UTC(+fullMatch[1], +fullMatch[2] - 1, +fullMatch[3]);
+  } else if (monthMatch) {
+    const y = +monthMatch[1], m = +monthMatch[2];
+    const monthStart = Date.UTC(y, m - 1, 1);
+    if (monthStart > now) return false;        // entirely in the future
+    const monthEnd = Date.UTC(y, m, 0);         // day 0 of next month
+    dealTime = Math.min(monthEnd, now);         // clamp the current month to today
+  } else {
+    return false;
+  }
   if (Number.isNaN(dealTime)) return false;
-  const ageMs = Date.now() - dealTime;
+  const ageMs = now - dealTime;
   const SIXTY_DAYS = 60 * 24 * 60 * 60 * 1000;
   return ageMs >= 0 && ageMs <= SIXTY_DAYS;
 }
