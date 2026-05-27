@@ -1,0 +1,15 @@
+<svg width="422" height="80" viewBox="0 0 422 80" role="img" xmlns="http://www.w3.org/2000/svg">
+  <title>GulfDealFlow</title>
+  <desc>GulfDealFlow — GCC Venture Intelligence</desc>
+  <polygon points="14,6 28,20 14,34 0,20" fill="#06b6d4"/>
+  <text x="42" y="20" dominant-baseline="central"
+        font-family="system-ui,-apple-system,'Helvetica Neue',Arial,sans-serif"
+        font-size="46" font-weight="700" fill="#06b6d4" letter-spacing="7">GULF</text>
+  <rect x="191" y="0" width="1.5" height="40" fill="#06b6d4" opacity="0.35"/>
+  <text x="209" y="20" dominant-baseline="central"
+        font-family="system-ui,-apple-system,'Helvetica Neue',Arial,sans-serif"
+        font-size="46" font-weight="700" fill="#f1f5f9" letter-spacing="1">DEALFLOW</text>
+  <text x="211" y="62" text-anchor="middle" dominant-baseline="central"
+        font-family="system-ui,-apple-system,'Helvetica Neue',Arial,sans-serif"
+        font-size="11" font-weight="400" fill="#475569" letter-spacing="4">GCC VENTURE INTELLIGENCE</text>
+</svg>

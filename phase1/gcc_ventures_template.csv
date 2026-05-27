@@ -1,0 +1,4 @@
+deal_id,company_name,country,city,date,stage,amount_usd,disclosed,sector,description,founded_year,website,lead_investor,co_investors,investor_types,source,notes
+1,Tabby,UAE,Dubai,2023-11,Series D,200000000,TRUE,Fintech,Buy-now-pay-later platform operating across UAE and Saudi Arabia,2019,tabby.ai,Wellington Management,"STV, Mubadala, PayPal Ventures","VC, CVC, Government",Crunchbase,Largest BNPL round in MENA to date
+2,Sary,Saudi Arabia,Riyadh,2023-06,Series C,35000000,TRUE,E-commerce & Retail,B2B marketplace connecting food and beverage businesses with wholesalers,2018,sary.com,Sanabil Investments,"Rocketship.vc, Wamda Capital",VC,Magnitt,
+3,Altibbi,UAE,Dubai,2023-03,Series B,,FALSE,Healthtech,Arabic-language digital health platform offering teleconsultations and medical content,2010,altibbi.com,Undisclosed,,VC,Gulf News,Amount undisclosed

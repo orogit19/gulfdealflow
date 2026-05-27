@@ -1,0 +1,112 @@
+# ─────────────────────────────────────────────────────────────
+# Environments & secrets — NEVER commit
+# ─────────────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.env
+*.env.local
+
+# Common credential/key file patterns
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+secrets.json
+credentials.json
+service-account*.json
+*-credentials.json
+*_credentials.json
+
+# ─────────────────────────────────────────────────────────────
+# Python
+# ─────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+.installed.cfg
+MANIFEST
+
+# Virtual envs
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Test / coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ─────────────────────────────────────────────────────────────
+# Node / Vite / frontend
+# ─────────────────────────────────────────────────────────────
+node_modules/
+dist/
+build/
+.vite/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-store/
+
+# ─────────────────────────────────────────────────────────────
+# Deployment / hosting
+# ─────────────────────────────────────────────────────────────
+.vercel/
+.netlify/
+
+# ─────────────────────────────────────────────────────────────
+# IDE / editor / OS
+# ─────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─────────────────────────────────────────────────────────────
+# Claude Code / agent tooling
+# ─────────────────────────────────────────────────────────────
+.claude/
+
+# ─────────────────────────────────────────────────────────────
+# Misc
+# ─────────────────────────────────────────────────────────────
+*.tmp
+*.bak
+*.orig
+files.zip

@@ -1,0 +1,12 @@
+# Files not needed in the deployed serverless bundle.
+.env
+.env.local
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Loader / fixer scripts are local-only — Vercel deploys the API surface.
+load_data.py
+fix_data.py
+schema.sql
