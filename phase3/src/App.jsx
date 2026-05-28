@@ -947,6 +947,38 @@ function Dashboard({ stats, onCountryClick }) {
 
 const ARTICLES = [
   {
+    id: "gcc-2025-review",
+    title: "GCC Venture Capital in 2025: Fewer Deals, Bigger Bets",
+    category: "Market Analysis",
+    date: "May 2026",
+    author: "GulfDealFlow",
+    excerpt:
+      "GCC venture capital held steady at $4.84B in 2025, but deal count fell 33% year-on-year. " +
+      "Capital concentrated into bigger cheques — a market that didn't shrink so much as concentrate.",
+    featured: true,
+    body: [
+      { kind: "p", text: "The headline number for GCC venture capital in 2025 is $4.84 billion — roughly in line with 2024's $5.14 billion and well above 2023's $3.91 billion. But the more revealing figure is this: deal count fell 33% year-on-year, from 513 rounds to 342." },
+      { kind: "p", text: "Capital held steady. Deals collapsed. That divergence tells the real story of 2025 — a market that didn't shrink so much as concentrate." },
+      { kind: "h2", text: "Fewer Cheques, Larger Rounds" },
+      { kind: "p", text: "Across the GCC, investors wrote fewer tickets and made them count. The top five deals of the year — Zelo ($715M, UAE), Lendo ($690M, Saudi Arabia), Optasia ($277.5M, UAE), Ninja ($254M, Saudi Arabia), and XPANCEO ($250M, UAE) — collectively account for a disproportionate share of the annual total. Strip those out and the ecosystem looks meaningfully quieter than the headline suggests." },
+      { kind: "p", text: "This isn't necessarily a warning sign. A shift toward larger, later-stage rounds reflects a maturing investor base that's prioritising scale and proven revenue over volume. The correction in deal count mirrors what happened in more developed VC markets a year or two earlier — a flight from spray-and-pray toward high-conviction deployment." },
+      { kind: "h2", text: "The Saudi Moment" },
+      { kind: "p", text: "The most significant structural shift of 2025 was Saudi Arabia pulling decisively ahead of the UAE in capital deployed. Across the broader MENA region, Saudi attracted $5 billion — two-thirds of the regional total and more than double the UAE's $2 billion — driven by PIF deployment, Vision 2030 execution, and a domestic VC scene (STV, Raed Ventures, Saudi Venture Capital) that now has the depth to lead large rounds without routing capital through Dubai." },
+      { kind: "p", text: "The UAE retained its lead on deal count and remained the preferred domicile for regional scale-ups raising internationally — DIFC and ADGM structures are still the standard for GCC-wide operations. But for the first time, operating capital is increasingly following the Saudi flag." },
+      { kind: "h2", text: "Sectors: Fintech and a Proptech Surprise" },
+      { kind: "p", text: "Fintech was the undisputed dominant sector, driven by BNPL consolidation (Tabby, Tamara), digital lending, and payments infrastructure. The sector has benefited from regulatory clarity in Saudi Arabia and the UAE and a growing base of digitally native consumers across the region." },
+      { kind: "p", text: "The year's surprise was proptech, which reached $1 billion regionally on the back of platforms digitising GCC property transactions, fractional ownership, and construction management. Given the scale of real estate development underway across Saudi Arabia and the UAE, proptech catching institutional attention makes structural sense — and the runway remains long." },
+      { kind: "p", text: "B2B enterprise tech also crossed a milestone, outpacing B2C funding for the first time — a signal that the region is moving beyond consumer apps toward the infrastructure layer." },
+      { kind: "h2", text: "Qatar's Breakout Year" },
+      { kind: "p", text: "At the smaller-market level, Qatar stood out. Venture funding hit a record QR214 million in 2025, up 81% year-on-year, elevating Qatar to the fourth most active MENA market by capital deployed. Fintech led deal activity (11 deals, 33% of the total), while transport and logistics attracted the most capital, anchored by Snoonu's Series C round. Snoonu was subsequently acquired by Saudi logistics group Jahez at a QR1.1 billion valuation — one of the cleaner exit stories the GCC ecosystem produced all year." },
+      { kind: "p", text: "Kuwait, Bahrain, and Oman remain at early ecosystem stages, contributing a combined small share of GCC deal flow but showing signs of increasing government-backed investment activity." },
+      { kind: "h2", text: "Early 2026: The Correction" },
+      { kind: "p", text: "The momentum has cooled. Q1 2026 produced $941 million across MENA — a 37% year-on-year decline — as geopolitical tensions weighed on investor sentiment and March deal flow dropped sharply. The pullback follows a second half of 2025 that was unusually concentrated in mega-rounds; a return to baseline was inevitable." },
+      { kind: "p", text: "Saudi sovereign capital remains active, and AI, cybersecurity, and financial infrastructure are still attracting cheques. But the easy environment of H2 2025 has given way to something more selective — which, for high-quality GCC startups with real fundamentals, may be the better operating climate anyway." },
+    ],
+    footnote: "Data sourced from Lucidity Insights, Wamda Research Lab, MAGNiTT, and Gulf Times. GulfDealFlow tracks 300+ GCC venture deals from 2020 to present.",
+  },
+  {
     id: "gcc-2024-review",
     title: "State of GCC Venture: 2024 in Review",
     category: "Market Analysis",
@@ -954,7 +986,6 @@ const ARTICLES = [
     excerpt:
       "2024 marked a pivotal year for venture capital across the Gulf, with deal volume " +
       "reaching new highs and fintech cementing its position as the region's dominant sector…",
-    featured: true,
     status: "coming-soon",
   },
   {
@@ -1001,13 +1032,25 @@ function ReadMore({ disabled }) {
   );
 }
 
-function FeaturedCard({ article }) {
+function FeaturedCard({ article, onOpen }) {
   const disabled = article.status === "coming-soon";
+  const handleClick = () => { if (!disabled) onOpen?.(article); };
+  const handleKeyDown = (e) => {
+    if (!disabled && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      onOpen?.(article);
+    }
+  };
   return (
     <article
+      onClick={handleClick}
+      onKeyDown={handleKeyDown}
+      role={disabled ? undefined : "button"}
+      tabIndex={disabled ? undefined : 0}
+      aria-label={disabled ? undefined : `Read article: ${article.title}`}
       className={`group bg-gdf-surface border border-gdf-border rounded-lg p-6 sm:p-8
-                  transition-colors duration-200
-                  ${disabled ? "" : "cursor-pointer"}
+                  transition-colors duration-200 outline-none
+                  ${disabled ? "" : "cursor-pointer focus-visible:border-gdf-teal/60"}
                   hover:border-gdf-teal/40`}
     >
       <div className="flex flex-wrap items-center gap-2 mb-5">
@@ -1038,13 +1081,25 @@ function FeaturedCard({ article }) {
   );
 }
 
-function ArticleCard({ article }) {
+function ArticleCard({ article, onOpen }) {
   const disabled = article.status === "coming-soon";
+  const handleClick = () => { if (!disabled) onOpen?.(article); };
+  const handleKeyDown = (e) => {
+    if (!disabled && (e.key === "Enter" || e.key === " ")) {
+      e.preventDefault();
+      onOpen?.(article);
+    }
+  };
   return (
     <article
+      onClick={handleClick}
+      onKeyDown={handleKeyDown}
+      role={disabled ? undefined : "button"}
+      tabIndex={disabled ? undefined : 0}
+      aria-label={disabled ? undefined : `Read article: ${article.title}`}
       className={`group bg-gdf-surface border border-gdf-border rounded-lg p-5
-                  transition-colors duration-200 flex flex-col
-                  ${disabled ? "" : "cursor-pointer"}
+                  transition-colors duration-200 flex flex-col outline-none
+                  ${disabled ? "" : "cursor-pointer focus-visible:border-gdf-teal/60"}
                   hover:border-gdf-teal/40`}
     >
       <div className="flex flex-wrap items-center gap-2 mb-4">
@@ -1082,9 +1137,99 @@ function PlaceholderCard() {
   );
 }
 
+function ArticleReader({ article, onBack }) {
+  // ESC returns to the list.
+  useEffect(() => {
+    const handler = (e) => { if (e.key === "Escape") onBack(); };
+    document.addEventListener("keydown", handler);
+    return () => document.removeEventListener("keydown", handler);
+  }, [onBack]);
+
+  // Scroll to top when entering the reader.
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "auto" });
+  }, [article?.id]);
+
+  return (
+    <article className="max-w-3xl mx-auto space-y-6">
+      <button
+        onClick={onBack}
+        className="inline-flex items-center gap-2 text-sm font-mono uppercase
+                   tracking-wider text-gdf-teal hover:text-white
+                   transition-colors"
+      >
+        <span aria-hidden="true">←</span> Back to Insights
+      </button>
+
+      <header className="space-y-3 pb-5 border-b border-gdf-border">
+        <div className="flex flex-wrap items-center gap-2">
+          <CategoryTag>{article.category}</CategoryTag>
+          <span className="text-[11px] font-mono text-gdf-muted uppercase tracking-wider">
+            {article.date}
+          </span>
+          {article.author && (
+            <>
+              <span className="text-gdf-border">·</span>
+              <span className="text-[11px] font-mono text-gdf-muted uppercase tracking-wider">
+                {article.author}
+              </span>
+            </>
+          )}
+        </div>
+        <h1 className="text-3xl sm:text-4xl font-bold text-white leading-tight">
+          {article.title}
+        </h1>
+        {article.excerpt && (
+          <p className="text-gdf-muted text-base sm:text-lg leading-relaxed">
+            {article.excerpt}
+          </p>
+        )}
+      </header>
+
+      <div className="space-y-5">
+        {(article.body || []).map((block, i) => {
+          if (block.kind === "h2") {
+            return (
+              <h2
+                key={i}
+                className="text-xl sm:text-2xl font-bold text-gdf-text pt-4"
+              >
+                {block.text}
+              </h2>
+            );
+          }
+          return (
+            <p
+              key={i}
+              className="text-gdf-muted text-base leading-relaxed"
+            >
+              {block.text}
+            </p>
+          );
+        })}
+      </div>
+
+      {article.footnote && (
+        <footer className="pt-6 border-t border-gdf-border">
+          <p className="text-gdf-muted text-xs italic leading-relaxed">
+            {article.footnote}
+          </p>
+        </footer>
+      )}
+    </article>
+  );
+}
+
 function Insights() {
+  const [selectedId, setSelectedId] = useState(null);
   const featured = ARTICLES.find((a) => a.featured);
   const others = ARTICLES.filter((a) => !a.featured);
+
+  const selected = selectedId ? ARTICLES.find((a) => a.id === selectedId) : null;
+  if (selected) {
+    return <ArticleReader article={selected} onBack={() => setSelectedId(null)} />;
+  }
+
   return (
     <div className="space-y-8">
       <header className="space-y-1.5">
@@ -1094,11 +1239,13 @@ function Insights() {
         </p>
       </header>
 
-      {featured && <FeaturedCard article={featured} />}
+      {featured && (
+        <FeaturedCard article={featured} onOpen={(a) => setSelectedId(a.id)} />
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {others.map((a) => (
-          <ArticleCard key={a.id} article={a} />
+          <ArticleCard key={a.id} article={a} onOpen={(art) => setSelectedId(art.id)} />
         ))}
         <PlaceholderCard />
       </div>
