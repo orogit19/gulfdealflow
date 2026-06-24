@@ -116,6 +116,8 @@ create table if not exists public.extracted_deals (
     status             text not null default 'needs_review',
     extraction_status  text not null default 'pending',
     extraction_payload  jsonb,
+    reviewed_at        timestamptz,
+    approved_deal_id   text references public.deals(deal_id) on delete set null,
     created_at         timestamptz not null default now(),
     updated_at         timestamptz not null default now(),
     constraint extracted_deals_status_chk
@@ -217,6 +219,10 @@ create index if not exists extracted_deals_extraction_status_idx
     on public.extracted_deals (extraction_status);
 create index if not exists extracted_deals_status_idx
     on public.extracted_deals (status);
+create index if not exists extracted_deals_reviewed_at_idx
+    on public.extracted_deals (reviewed_at desc);
+create index if not exists extracted_deals_approved_deal_id_idx
+    on public.extracted_deals (approved_deal_id);
 create index if not exists ingestion_logs_raw_source_id_idx
     on public.ingestion_logs (raw_source_id);
 create index if not exists ingestion_logs_created_at_idx

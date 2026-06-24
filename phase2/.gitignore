@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.testdeps/
 .pytest_cache/
+*.pid
 
 .vercel

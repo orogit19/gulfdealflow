@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, Legend,
@@ -8,6 +8,26 @@ import { geoCentroid } from "d3-geo";
 import gccTopo from "./data/gcc-topo.json";
 
 const API_URL = import.meta.env.VITE_API_URL || "http://localhost:8000";
+const ADMIN_API_KEY_STORAGE = "gdf_admin_api_key";
+const ADMIN_UI_ENABLED =
+  import.meta.env.DEV || import.meta.env.VITE_ENABLE_ADMIN_UI === "true";
+
+function getAdminApiKey() {
+  if (typeof window === "undefined") return "";
+  return window.localStorage.getItem(ADMIN_API_KEY_STORAGE) || "";
+}
+
+async function apiFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  const adminKey = getAdminApiKey();
+  if (adminKey) headers.set("X-Admin-Key", adminKey);
+  try {
+    return await fetch(url, { ...options, headers });
+  } catch (err) {
+    if (err?.name === "AbortError") throw err;
+    throw new Error(`Could not reach backend API at ${API_URL}. Check that the backend is running and CORS/VITE_API_URL are configured.`);
+  }
+}
 
 const COUNTRIES = ["UAE", "Saudi Arabia", "Kuwait", "Bahrain", "Oman", "Qatar"];
 const STAGES = [
@@ -408,7 +428,7 @@ function StatsBar({ stats }) {
 
 /* ---------- Nav (tab switcher) ---------- */
 
-function Nav({ tab, setTab }) {
+function Nav({ tab, setTab, adminUiEnabled }) {
   return (
     <nav className="border-b border-gdf-border bg-gdf-bg overflow-x-auto">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 flex min-w-max">
@@ -416,6 +436,11 @@ function Nav({ tab, setTab }) {
         <NavTab active={tab === "dashboard"} onClick={() => setTab("dashboard")}>Dashboard</NavTab>
         <NavTab active={tab === "insights"}  onClick={() => setTab("insights")}>Insights</NavTab>
         <NavTab active={tab === "investors"} onClick={() => setTab("investors")}>Investors</NavTab>
+        {adminUiEnabled && (
+          <NavTab active={tab === "review"} onClick={() => setTab("review")}>
+            Review
+          </NavTab>
+        )}
         <NavTab active={tab === "about"}     onClick={() => setTab("about")}>About</NavTab>
       </div>
     </nav>
@@ -2598,6 +2623,1627 @@ function Th({ children, align = "left", sortable, sortState, onSort }) {
   );
 }
 
+/* ---------- Extracted deal review ---------- */
+
+function draftFormFromRow(row) {
+  if (!row) {
+    return {
+      company_name: "",
+      country: "",
+      amount_usd: "",
+      amount_original: "",
+      currency_original: "",
+      stage: "",
+      announcement_date: "",
+      sector: "",
+      sub_sector: "",
+      lead_investor: "",
+      co_investors: "",
+      website: "",
+      is_funding_round: true,
+      confidence_score: "",
+      extraction_notes: "",
+    };
+  }
+  return {
+    company_name: row.company_name || "",
+    country: row.country || "",
+    amount_usd: row.amount_usd ?? "",
+    amount_original: row.amount_original || "",
+    currency_original: row.currency_original || "",
+    stage: row.stage || "",
+    announcement_date: row.announcement_date || row.announced_date || "",
+    sector: row.sector || "",
+    sub_sector: row.sub_sector || "",
+    lead_investor: row.lead_investor || "",
+    co_investors: Array.isArray(row.co_investors)
+      ? row.co_investors.join(", ")
+      : row.co_investors || "",
+    website: row.website || "",
+    is_funding_round: row.is_funding_round !== false,
+    confidence_score: row.confidence_score ?? "",
+    extraction_notes: row.extraction_notes || "",
+  };
+}
+
+function nullableText(value) {
+  const trimmed = String(value ?? "").trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+function nullableNumber(value) {
+  if (value === "" || value == null) return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function coInvestorArray(value) {
+  return String(value || "")
+    .split(/[\n,]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function draftPayloadFromForm(form) {
+  return {
+    company_name: nullableText(form.company_name),
+    country: nullableText(form.country),
+    amount_usd: nullableNumber(form.amount_usd),
+    amount_original: nullableText(form.amount_original),
+    currency_original: nullableText(form.currency_original),
+    stage: nullableText(form.stage),
+    announcement_date: nullableText(form.announcement_date),
+    sector: nullableText(form.sector),
+    sub_sector: nullableText(form.sub_sector),
+    lead_investor: nullableText(form.lead_investor),
+    co_investors: coInvestorArray(form.co_investors),
+    website: nullableText(form.website),
+    is_funding_round: Boolean(form.is_funding_round),
+    confidence_score: nullableNumber(form.confidence_score),
+    extraction_notes: nullableText(form.extraction_notes),
+  };
+}
+
+function approvalIssuesForForm(form) {
+  const issues = [];
+  if (!form.is_funding_round) issues.push("Draft must be marked as a funding round.");
+  if (!nullableText(form.company_name)) issues.push("Company name is required.");
+  if (!nullableText(form.country)) issues.push("Country is required.");
+  if (!nullableText(form.stage)) issues.push("Stage is required.");
+
+  const date = nullableText(form.announcement_date);
+  if (!date) {
+    issues.push("Announcement date is required.");
+  } else if (!/^\d{4}-\d{2}(-\d{2})?$/.test(date)) {
+    issues.push("Announcement date must use YYYY-MM-DD or YYYY-MM.");
+  }
+
+  const amountUsd = nullableNumber(form.amount_usd);
+  if (amountUsd == null && nullableText(form.amount_original) !== "Undisclosed") {
+    issues.push('Use amount_original = "Undisclosed" when amount_usd is blank.');
+  }
+  if (amountUsd != null && amountUsd < 0) {
+    issues.push("Amount USD cannot be negative.");
+  }
+
+  const confidence = nullableNumber(form.confidence_score);
+  if (confidence == null) {
+    issues.push("Confidence score is required.");
+  } else if (confidence < 0.6) {
+    issues.push("Confidence score must be at least 0.6 before approval.");
+  }
+
+  return issues;
+}
+
+async function parseApiResponse(response) {
+  const text = await response.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error("Admin API key missing or invalid. Save the correct key in Admin access, then retry.");
+    }
+    const detail = data?.detail || text || `HTTP ${response.status}`;
+    if (detail?.errors) {
+      throw new Error(detail.errors.join(" "));
+    }
+    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+  }
+  return data;
+}
+
+const REVIEW_STATUS_FILTERS = [
+  { value: "needs_review", label: "Needs Review" },
+  { value: "approved", label: "Approved" },
+  { value: "rejected", label: "Rejected" },
+];
+
+const REVIEW_READINESS_FILTERS = [
+  { value: "all", label: "All" },
+  { value: "ready", label: "Ready" },
+  { value: "needs_fix", label: "Needs Fix" },
+  { value: "non_funding", label: "Non-Funding" },
+];
+
+const REVIEW_PAGE_SIZE = 100;
+
+function draftReadiness(row) {
+  if (row?.is_funding_round === false) return "non_funding";
+  return approvalIssuesForForm(draftFormFromRow(row)).length === 0
+    ? "ready"
+    : "needs_fix";
+}
+
+function readinessLabel(value) {
+  if (value === "ready") return "Ready";
+  if (value === "non_funding") return "Non-Funding";
+  return "Needs Fix";
+}
+
+function readinessBadgeClass(value) {
+  if (value === "ready") {
+    return "border-emerald-900/70 bg-emerald-950/30 text-emerald-200";
+  }
+  if (value === "non_funding") {
+    return "border-red-900/70 bg-red-950/30 text-red-200";
+  }
+  return "border-amber-900/70 bg-amber-950/30 text-amber-100";
+}
+
+const MIGRATION_009_SQL = `alter table public.extracted_deals
+    add column if not exists reviewed_at timestamptz,
+    add column if not exists approved_deal_id text references public.deals(deal_id) on delete set null;
+
+create index if not exists extracted_deals_reviewed_at_idx
+    on public.extracted_deals (reviewed_at desc);
+
+create index if not exists extracted_deals_approved_deal_id_idx
+    on public.extracted_deals (approved_deal_id);`;
+
+function ReviewQueue() {
+  const queueRequestId = useRef(0);
+  const [rows, setRows] = useState([]);
+  const [selectedId, setSelectedId] = useState(null);
+  const [reviewStatus, setReviewStatus] = useState("needs_review");
+  const [form, setForm] = useState(draftFormFromRow(null));
+  const [rawSource, setRawSource] = useState(null);
+  const [rawSourceLoading, setRawSourceLoading] = useState(false);
+  const [rawSourceRefetching, setRawSourceRefetching] = useState(false);
+  const [ingestionLogs, setIngestionLogs] = useState([]);
+  const [ingestionLogsLoading, setIngestionLogsLoading] = useState(false);
+  const [approvalPreview, setApprovalPreview] = useState(null);
+  const [approvalPreviewLoading, setApprovalPreviewLoading] = useState(false);
+  const [reextracting, setReextracting] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [ingesting, setIngesting] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [pendingSources, setPendingSources] = useState([]);
+  const [pendingSourcesLoading, setPendingSourcesLoading] = useState(false);
+  const [processingSourceId, setProcessingSourceId] = useState(null);
+  const [batchProgress, setBatchProgress] = useState(null);
+  const [cleaning, setCleaning] = useState(null);
+  const [ingestUrl, setIngestUrl] = useState("");
+  const [queueSearch, setQueueSearch] = useState("");
+  const [queueReadiness, setQueueReadiness] = useState("all");
+  const [queueStats, setQueueStats] = useState(null);
+  const [queueHasMore, setQueueHasMore] = useState(false);
+  const [queueNextOffset, setQueueNextOffset] = useState(null);
+  const [queueTotalMatched, setQueueTotalMatched] = useState(null);
+  const [dbStatus, setDbStatus] = useState(null);
+  const [configStatus, setConfigStatus] = useState(null);
+  const [adminKeyInput, setAdminKeyInput] = useState(() => getAdminApiKey());
+  const [error, setError] = useState(null);
+  const [message, setMessage] = useState(null);
+
+  const normalizedQueueSearch = queueSearch.trim();
+  const filteredRows = rows;
+  const hasQueueFilters = Boolean(normalizedQueueSearch) || queueReadiness !== "all";
+  const selected = filteredRows.find((row) => row.id === selectedId) || filteredRows[0] || null;
+  const selectedIsEditable = selected?.status === "needs_review";
+  const selectedIsRejected = selected?.status === "rejected";
+  const reviewStatusLabel =
+    REVIEW_STATUS_FILTERS.find((item) => item.value === reviewStatus)?.label || reviewStatus;
+  const readinessCounts = queueStats?.by_readiness?.[reviewStatus] || null;
+
+  const loadQueueStats = () =>
+    apiFetch(`${API_URL}/extracted-deals/stats`)
+      .then(parseApiResponse)
+      .then(setQueueStats)
+      .catch(() => setQueueStats(null));
+
+  const reloadAdminStatus = () => {
+    apiFetch(`${API_URL}/admin/db-status`)
+      .then(parseApiResponse)
+      .then(setDbStatus)
+      .catch(() => setDbStatus(null));
+    apiFetch(`${API_URL}/admin/config-status`)
+      .then(parseApiResponse)
+      .then(setConfigStatus)
+      .catch(() => setConfigStatus(null));
+  };
+
+  const loadPendingSources = () => {
+    setPendingSourcesLoading(true);
+    const params = new URLSearchParams({
+      status: "pending,fetch_failed,extraction_failed",
+      source_type: "rss_candidate",
+      limit: "50",
+    });
+    return apiFetch(`${API_URL}/raw-sources?${params.toString()}`)
+      .then(parseApiResponse)
+      .then((data) => {
+        const sources = data.raw_sources || [];
+        setPendingSources(sources);
+        return sources;
+      })
+      .catch(() => {
+        setPendingSources([]);
+        return [];
+      })
+      .finally(() => setPendingSourcesLoading(false));
+  };
+
+  const loadDrafts = (status = reviewStatus, preferredId = null, options = {}) => {
+    const requestId = queueRequestId.current + 1;
+    queueRequestId.current = requestId;
+    const append = Boolean(options.append);
+    const offset = append ? (queueNextOffset ?? rows.length) : 0;
+    const searchTerm = options.q ?? queueSearch.trim();
+    const readinessFilter = options.readiness ?? queueReadiness;
+    if (append) {
+      setLoadingMore(true);
+    } else {
+      setLoadingMore(false);
+      setLoading(true);
+    }
+    setError(null);
+    const params = new URLSearchParams({
+      status,
+      limit: String(REVIEW_PAGE_SIZE),
+      offset: String(offset),
+    });
+    if (searchTerm) params.set("q", searchTerm);
+    if (readinessFilter !== "all") params.set("readiness", readinessFilter);
+    return apiFetch(`${API_URL}/extracted-deals?${params.toString()}`)
+      .then(parseApiResponse)
+      .then((data) => {
+        if (requestId !== queueRequestId.current) return null;
+        const drafts = data.extracted_deals || [];
+        const nextRows = append ? [...rows, ...drafts] : drafts;
+        setRows(nextRows);
+        setQueueHasMore(Boolean(data.has_more));
+        setQueueNextOffset(data.next_offset ?? null);
+        setQueueTotalMatched(data.total_matched ?? null);
+        setSelectedId((current) =>
+          nextRows.some((row) => row.id === (preferredId || current))
+            ? (preferredId || current)
+            : nextRows[0]?.id || null
+        );
+        return nextRows;
+      })
+      .catch((err) => {
+        if (requestId === queueRequestId.current) {
+          setError(String(err.message || err));
+        }
+        return null;
+      })
+      .finally(() => {
+        if (requestId !== queueRequestId.current) return;
+        if (append) {
+          setLoadingMore(false);
+        } else {
+          setLoading(false);
+          loadQueueStats();
+        }
+      });
+  };
+
+  useEffect(() => {
+    const timer = setTimeout(
+      () => loadDrafts(reviewStatus, null, { q: normalizedQueueSearch }),
+      normalizedQueueSearch ? 300 : 0
+    );
+    return () => clearTimeout(timer);
+  }, [reviewStatus, normalizedQueueSearch, queueReadiness]);
+
+  useEffect(() => {
+    reloadAdminStatus();
+    loadPendingSources();
+  }, []);
+
+  useEffect(() => {
+    setForm(draftFormFromRow(selected));
+  }, [selected?.id]);
+
+  const loadApprovalPreview = (draftId = selected?.id) => {
+    if (!draftId) {
+      setApprovalPreview(null);
+      return Promise.resolve(null);
+    }
+    setApprovalPreviewLoading(true);
+    return apiFetch(`${API_URL}/extracted-deals/${draftId}/approval-preview`)
+      .then(parseApiResponse)
+      .then((data) => {
+        setApprovalPreview(data);
+        return data;
+      })
+      .catch(() => {
+        setApprovalPreview(null);
+        return null;
+      })
+      .finally(() => setApprovalPreviewLoading(false));
+  };
+
+  useEffect(() => {
+    loadApprovalPreview(selected?.id);
+  }, [selected?.id]);
+
+  const refreshIngestionLogs = (rawSourceId = selected?.raw_source_id, signal = null) => {
+    if (!rawSourceId) {
+      setIngestionLogs([]);
+      return Promise.resolve([]);
+    }
+    setIngestionLogsLoading(true);
+    return apiFetch(`${API_URL}/ingestion-logs?raw_source_id=${encodeURIComponent(rawSourceId)}&limit=25`, { signal })
+      .then(parseApiResponse)
+      .then((data) => {
+        const logs = data.logs || [];
+        setIngestionLogs(logs);
+        return logs;
+      })
+      .catch((err) => {
+        if (err.name !== "AbortError") setIngestionLogs([]);
+        return [];
+      })
+      .finally(() => setIngestionLogsLoading(false));
+  };
+
+  useEffect(() => {
+    if (!selected?.raw_source_id) {
+      setRawSource(null);
+      setIngestionLogs([]);
+      return;
+    }
+    const ctrl = new AbortController();
+    setRawSourceLoading(true);
+    setIngestionLogsLoading(true);
+    apiFetch(`${API_URL}/raw-sources/${selected.raw_source_id}`, { signal: ctrl.signal })
+      .then(parseApiResponse)
+      .then(setRawSource)
+      .catch((err) => {
+        if (err.name !== "AbortError") setRawSource(null);
+      })
+      .finally(() => setRawSourceLoading(false));
+    refreshIngestionLogs(selected.raw_source_id, ctrl.signal);
+    return () => ctrl.abort();
+  }, [selected?.raw_source_id]);
+
+  const updateField = (field, value) => {
+    setForm((prev) => ({ ...prev, [field]: value }));
+  };
+
+  const buildPayload = () => draftPayloadFromForm(form);
+  const currentPayload = buildPayload();
+  const selectedPayload = selected
+    ? draftPayloadFromForm(draftFormFromRow(selected))
+    : null;
+  const formDirty = Boolean(
+    selectedIsEditable
+    && selectedPayload
+    && JSON.stringify(currentPayload) !== JSON.stringify(selectedPayload)
+  );
+
+  useEffect(() => {
+    if (!formDirty) return undefined;
+    const handleBeforeUnload = (event) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [formDirty]);
+
+  const approvalIssues = approvalIssuesForForm(form);
+  const canApprove = Boolean(selected) && approvalIssues.length === 0;
+
+  const saveDraft = async () => {
+    if (!selected) return null;
+    if (!selectedIsEditable) return selected;
+    if (!formDirty) return selected;
+    const response = await apiFetch(`${API_URL}/extracted-deals/${selected.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(currentPayload),
+    });
+    const updated = await parseApiResponse(response);
+    setRows((prev) => prev.map((row) => (row.id === updated.id ? updated : row)));
+    await loadApprovalPreview(updated.id);
+    loadQueueStats();
+    await refreshIngestionLogs(updated.raw_source_id);
+    return updated;
+  };
+
+  const confirmDiscardChanges = (message = "Discard unsaved changes?") => {
+    if (!formDirty) return true;
+    const confirmed = window.confirm(message);
+    if (confirmed) setForm(draftFormFromRow(selected));
+    return confirmed;
+  };
+
+  const changeReviewStatus = (status) => {
+    if (status === reviewStatus) return;
+    if (!confirmDiscardChanges("Discard unsaved changes and switch queues?")) return;
+    setReviewStatus(status);
+  };
+
+  const changeQueueReadiness = (value) => {
+    if (value === queueReadiness) return;
+    if (!confirmDiscardChanges("Discard unsaved changes and change filters?")) return;
+    setQueueReadiness(value);
+  };
+
+  const changeQueueSearch = (value) => {
+    if (value === queueSearch) return;
+    if (!confirmDiscardChanges("Discard unsaved changes and search the queue?")) return;
+    setQueueSearch(value);
+  };
+
+  const refreshDrafts = () => {
+    if (!confirmDiscardChanges("Discard unsaved changes and refresh the queue?")) return;
+    loadDrafts(reviewStatus);
+  };
+
+  const saveAdminKey = () => {
+    const key = adminKeyInput.trim();
+    if (key) {
+      window.localStorage.setItem(ADMIN_API_KEY_STORAGE, key);
+      setAdminKeyInput(key);
+      setMessage("Admin API key saved in this browser.");
+    } else {
+      window.localStorage.removeItem(ADMIN_API_KEY_STORAGE);
+      setAdminKeyInput("");
+      setMessage("Admin API key cleared from this browser.");
+    }
+    setError(null);
+    reloadAdminStatus();
+    loadQueueStats();
+    loadPendingSources();
+    loadDrafts(reviewStatus, selected?.id);
+  };
+
+  const clearAdminKey = () => {
+    window.localStorage.removeItem(ADMIN_API_KEY_STORAGE);
+    setAdminKeyInput("");
+    setMessage("Admin API key cleared from this browser.");
+    setError(null);
+    reloadAdminStatus();
+    loadQueueStats();
+    loadPendingSources();
+    loadDrafts(reviewStatus, selected?.id);
+  };
+
+  const selectDraft = (row) => {
+    if (!row || row.id === selected?.id) return;
+    if (!confirmDiscardChanges("Discard unsaved changes and open another draft?")) return;
+    setSelectedId(row.id);
+  };
+
+  const runAction = async (action) => {
+    if (!selected) return;
+    if (action !== "reopen" && !selectedIsEditable) return;
+    if (action === "reopen" && !selectedIsRejected) return;
+    setSaving(true);
+    setError(null);
+    setMessage(null);
+    try {
+      if (action === "save") {
+        await saveDraft();
+        setMessage(formDirty ? "Draft saved." : "No changes to save.");
+      } else if (action === "approve") {
+        const note = window.prompt("Optional approval note", "");
+        if (note === null) return;
+        await saveDraft();
+        const response = await apiFetch(`${API_URL}/extracted-deals/${selected.id}/approve`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ note: nullableText(note) }),
+        });
+        const result = await parseApiResponse(response);
+        setReviewStatus("approved");
+        await loadDrafts("approved", result.extracted_deal?.id || selected.id);
+        setMessage(
+          result.already_approved
+            ? "This draft was already approved; loaded its existing deal."
+            : result.inserted
+            ? "Approved and inserted into deals."
+            : "Approved; an existing deal matched this draft."
+        );
+      } else if (action === "reject") {
+        if (!confirmDiscardChanges("Discard unsaved changes and reject this draft?")) return;
+        const reason = window.prompt("Optional rejection note", "");
+        if (reason === null) return;
+        const response = await apiFetch(`${API_URL}/extracted-deals/${selected.id}/reject`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reason: nullableText(reason) }),
+        });
+        const rejected = await parseApiResponse(response);
+        setReviewStatus("rejected");
+        await loadDrafts("rejected", rejected.id || selected.id);
+        setMessage("Draft rejected.");
+      } else if (action === "reopen") {
+        const response = await apiFetch(`${API_URL}/extracted-deals/${selected.id}/reopen`, {
+          method: "POST",
+        });
+        const reopened = await parseApiResponse(response);
+        setReviewStatus("needs_review");
+        await loadDrafts("needs_review", reopened.id || selected.id);
+        setMessage("Draft reopened for review.");
+      }
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const createReviewDraftFromUrl = async (url) => {
+    const rawResponse = await apiFetch(`${API_URL}/ingest/url`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url }),
+    });
+    const duplicateRawSource = rawResponse.headers.get("X-GDF-Duplicate") === "true";
+    const ingestedSource = await parseApiResponse(rawResponse);
+    if (
+      ingestedSource.status === "fetch_failed"
+      || !(ingestedSource.raw_text || ingestedSource.extracted_text)
+    ) {
+      throw new Error(
+        ingestedSource.error_message
+        || "Article fetch failed; no readable text was saved."
+      );
+    }
+    const extractResponse = await apiFetch(
+      `${API_URL}/ingest/extract/${ingestedSource.id}`,
+      { method: "POST" }
+    );
+    const existingExtraction =
+      extractResponse.headers.get("X-GDF-Existing-Extraction") === "true"
+      || extractResponse.status === 200;
+    const extractedDeal = await parseApiResponse(extractResponse);
+    return {
+      duplicateRawSource,
+      existingExtraction,
+      extractedDeal,
+    };
+  };
+
+  const openCreatedDraft = async (extractedDeal) => {
+    const nextReadiness = extractedDeal.is_funding_round === false ? "non_funding" : "all";
+    setQueueSearch("");
+    setQueueReadiness(nextReadiness);
+    setReviewStatus("needs_review");
+    await loadDrafts("needs_review", extractedDeal.id, { q: "", readiness: nextReadiness });
+  };
+
+  const submitIngestUrl = async (event) => {
+    event.preventDefault();
+    const url = ingestUrl.trim();
+    if (!url) return;
+    setIngesting(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await createReviewDraftFromUrl(url);
+      setIngestUrl("");
+      await openCreatedDraft(result.extractedDeal);
+      let successMessage = "URL ingested and extracted into a review draft.";
+      if (result.existingExtraction) {
+        successMessage = result.duplicateRawSource
+          ? "URL was already ingested and already had an active draft; loaded it for review."
+          : "URL already had an active draft; loaded it for review.";
+      } else if (result.extractedDeal.is_funding_round === false) {
+        successMessage = result.duplicateRawSource
+          ? "URL was already ingested; AI marked it as non-funding for review."
+          : "URL ingested; AI marked it as non-funding for review.";
+      } else if (result.duplicateRawSource) {
+        successMessage = "URL was already ingested; extracted a fresh review draft.";
+      }
+      setMessage(successMessage);
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setIngesting(false);
+    }
+  };
+
+  const discoverFundingArticles = async () => {
+    if (formDirty) return;
+    setDiscovering(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await apiFetch(`${API_URL}/discover/rss`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const result = await parseApiResponse(response);
+      await loadPendingSources();
+      const errorCount = result.query_errors?.length || 0;
+      setMessage(
+        `Discovery added ${result.discovered_count} new candidate${
+          result.discovered_count === 1 ? "" : "s"
+        }${errorCount ? `; ${errorCount} quer${errorCount === 1 ? "y" : "ies"} failed` : ""}.`
+      );
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
+  const processPendingSource = async (source) => {
+    if (!source?.id || !source.url || formDirty || batchProgress) return;
+    setProcessingSourceId(source.id);
+    setError(null);
+    setMessage(null);
+    try {
+      const result = await createReviewDraftFromUrl(source.url);
+      await loadPendingSources();
+      await openCreatedDraft(result.extractedDeal);
+      setMessage(
+        result.extractedDeal.is_funding_round === false
+          ? "Candidate processed; AI marked it as non-funding for review."
+          : "Candidate fetched and extracted into a review draft."
+      );
+    } catch (err) {
+      await loadPendingSources();
+      setError(String(err.message || err));
+    } finally {
+      setProcessingSourceId(null);
+    }
+  };
+
+  const processPendingBatch = async () => {
+    if (formDirty || processingSourceId || batchProgress || pendingSources.length === 0) return;
+    const batch = pendingSources.slice(0, 3);
+    setBatchProgress({ current: 0, total: batch.length });
+    setError(null);
+    setMessage(null);
+    const completed = [];
+    const failures = [];
+    try {
+      for (let index = 0; index < batch.length; index += 1) {
+        const source = batch[index];
+        setBatchProgress({ current: index + 1, total: batch.length });
+        try {
+          const result = await createReviewDraftFromUrl(source.url);
+          completed.push(result.extractedDeal);
+        } catch (err) {
+          failures.push({
+            title: source.title || source.url,
+            error: String(err.message || err),
+          });
+        }
+      }
+      await loadPendingSources();
+      if (completed.length > 0) {
+        await openCreatedDraft(completed[completed.length - 1]);
+      }
+      setMessage(
+        `Batch processed ${completed.length} candidate${completed.length === 1 ? "" : "s"}${
+          failures.length
+            ? `; ${failures.length} failed and remain available for retry`
+            : ""
+        }.`
+      );
+      if (failures.length > 0) {
+        setError(failures.map((failure) => `${failure.title}: ${failure.error}`).join(" | "));
+      }
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setBatchProgress(null);
+    }
+  };
+
+  const runCleanup = async (kind) => {
+    setCleaning(kind);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await apiFetch(`${API_URL}/extracted-deals/actions/${kind}`, {
+        method: "POST",
+      });
+      const result = await parseApiResponse(response);
+      await loadDrafts();
+      const label = kind === "reject-non-funding" ? "non-funding" : "duplicate";
+      setMessage(`Rejected ${result.rejected_count} ${label} draft${result.rejected_count === 1 ? "" : "s"}.`);
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setCleaning(null);
+    }
+  };
+
+  const refetchSelectedSource = async () => {
+    if (!selected?.raw_source_id || !selectedIsEditable) return;
+    if (!confirmDiscardChanges("Discard unsaved changes and refetch the source text?")) return;
+    setRawSourceRefetching(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await apiFetch(`${API_URL}/raw-sources/${selected.raw_source_id}/refetch`, {
+        method: "POST",
+      });
+      const updated = await parseApiResponse(response);
+      setRawSource(updated);
+      if (updated.status === "fetch_failed" || !(updated.raw_text || updated.extracted_text)) {
+        throw new Error(updated.error_message || "Refetch failed; no readable source text was saved.");
+      }
+      const length = (updated.raw_text || updated.extracted_text || "").length;
+      setMessage(`Source text refreshed (${length} characters).`);
+      await refreshIngestionLogs(selected.raw_source_id);
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setRawSourceRefetching(false);
+    }
+  };
+
+  const reextractSelectedDraft = async () => {
+    if (!selected?.id || !selectedIsEditable) return;
+    if (!confirmDiscardChanges("Discard unsaved changes and re-extract this draft?")) return;
+    setReextracting(true);
+    setError(null);
+    setMessage(null);
+    try {
+      const response = await apiFetch(`${API_URL}/extracted-deals/${selected.id}/reextract`, {
+        method: "POST",
+      });
+      const updated = await parseApiResponse(response);
+      setRows((prev) => prev.map((row) => (row.id === updated.id ? updated : row)));
+      setForm(draftFormFromRow(updated));
+      setSelectedId(updated.id);
+      await loadApprovalPreview(updated.id);
+      loadQueueStats();
+      setMessage("Draft re-extracted from the current source text.");
+      await refreshIngestionLogs(selected.raw_source_id);
+    } catch (err) {
+      setError(String(err.message || err));
+    } finally {
+      setReextracting(false);
+    }
+  };
+
+  return (
+    <main className="flex-1 max-w-7xl w-full mx-auto px-4 sm:px-6 py-6">
+      <div className="flex items-center justify-between gap-3 flex-wrap mb-4">
+        <div>
+          <h2 className="text-lg font-semibold text-gdf-text">Draft Deal Review</h2>
+          <p className="text-sm text-gdf-muted">
+            {loading
+              ? "Loading drafts..."
+              : hasQueueFilters
+                ? `${filteredRows.length} loaded of ${queueTotalMatched ?? rows.length} matching ${reviewStatusLabel.toLowerCase()} draft${(queueTotalMatched ?? rows.length) === 1 ? "" : "s"}`
+                : `${rows.length} ${reviewStatusLabel.toLowerCase()} draft${rows.length === 1 ? "" : "s"}`}
+          </p>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <div className="inline-flex rounded-md border border-gdf-border overflow-hidden">
+            {REVIEW_STATUS_FILTERS.map((item) => (
+              <button
+                key={item.value}
+                onClick={() => changeReviewStatus(item.value)}
+                className={`px-3 py-2 text-sm border-r border-gdf-border last:border-r-0 flex items-center gap-2 ${
+                  reviewStatus === item.value
+                    ? "bg-gdf-teal text-slate-950 font-semibold"
+                    : "text-gdf-muted hover:text-gdf-text hover:bg-gdf-surface"
+                }`}
+              >
+                <span>{item.label}</span>
+                {queueStats?.by_status && (
+                  <span className={`min-w-6 rounded-full px-1.5 py-0.5 text-[10px] text-center ${
+                    reviewStatus === item.value
+                      ? "bg-slate-950/15 text-slate-950"
+                      : "bg-gdf-bg text-gdf-muted border border-gdf-border"
+                  }`}>
+                    {queueStats.by_status[item.value] || 0}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+          <button
+            onClick={refreshDrafts}
+            disabled={loading || saving}
+            className="px-3 py-2 rounded-md border border-gdf-border text-sm text-gdf-text hover:bg-gdf-surface disabled:opacity-50"
+          >
+            Refresh
+          </button>
+        </div>
+      </div>
+
+      {error && (
+        <div className="mb-4 border border-red-900/60 bg-red-950/30 text-red-200 px-4 py-3 rounded-md text-sm">
+          {error}
+        </div>
+      )}
+      {message && (
+        <div className="mb-4 border border-emerald-900/60 bg-emerald-950/30 text-emerald-200 px-4 py-3 rounded-md text-sm">
+          {message}
+        </div>
+      )}
+
+      <ConfigStatusBanner configStatus={configStatus} />
+      <DbStatusBanner dbStatus={dbStatus} />
+
+      <section className="mb-4 border border-gdf-border rounded-lg bg-gdf-bg overflow-hidden">
+        <div className="px-4 py-3 border-b border-gdf-border text-xs uppercase tracking-wider text-gdf-muted font-mono">
+          Admin access
+        </div>
+        <div className="p-4 flex flex-col sm:flex-row gap-2 sm:items-center">
+          <label className="flex-1">
+            <span className="sr-only">Admin API key</span>
+            <input
+              type="password"
+              value={adminKeyInput}
+              onChange={(event) => setAdminKeyInput(event.target.value)}
+              placeholder="Optional admin API key"
+              className="w-full bg-gdf-surface border border-gdf-border rounded-md px-3 py-2 text-sm text-gdf-text placeholder:text-gdf-muted focus:outline-none focus:border-gdf-teal"
+            />
+          </label>
+          <button
+            onClick={saveAdminKey}
+            className="px-3 py-2 rounded-md border border-gdf-border text-sm text-gdf-text hover:bg-gdf-surface"
+          >
+            Save Key
+          </button>
+          <button
+            onClick={clearAdminKey}
+            className="px-3 py-2 rounded-md border border-gdf-border text-sm text-gdf-text hover:bg-gdf-surface"
+          >
+            Clear
+          </button>
+        </div>
+      </section>
+
+      <section className="mb-4 border border-gdf-border rounded-lg bg-gdf-bg overflow-hidden">
+        <div className="px-4 py-3 border-b border-gdf-border text-xs uppercase tracking-wider text-gdf-muted font-mono">
+          Article ingest
+        </div>
+        <div className="p-4 flex flex-col lg:flex-row gap-3 lg:items-end">
+          <form onSubmit={submitIngestUrl} className="flex-1 flex flex-col sm:flex-row gap-2">
+            <label className="flex-1">
+              <span className="sr-only">Article URL</span>
+              <input
+                value={ingestUrl}
+                onChange={(event) => setIngestUrl(event.target.value)}
+                placeholder="Paste funding article URL"
+                className="w-full bg-gdf-surface border border-gdf-border rounded-md px-3 py-2 text-sm text-gdf-text placeholder:text-gdf-muted focus:outline-none focus:border-gdf-teal"
+              />
+            </label>
+            <button
+              type="submit"
+              disabled={ingesting || Boolean(batchProgress) || !ingestUrl.trim() || formDirty}
+              className="px-4 py-2 rounded-md bg-gdf-teal text-slate-950 text-sm font-semibold hover:bg-cyan-300 disabled:opacity-50 whitespace-nowrap"
+            >
+              {ingesting ? "Working..." : "Ingest + Extract"}
+            </button>
+          </form>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={discoverFundingArticles}
+              disabled={
+                discovering
+                || ingesting
+                || Boolean(processingSourceId)
+                || Boolean(batchProgress)
+                || formDirty
+              }
+              className="px-3 py-2 rounded-md border border-gdf-teal text-sm text-gdf-teal hover:bg-cyan-950/30 disabled:opacity-50"
+            >
+              {discovering ? "Discovering..." : "Discover RSS"}
+            </button>
+            <button
+              onClick={() => runCleanup("reject-non-funding")}
+              disabled={Boolean(cleaning) || ingesting || discovering || Boolean(batchProgress) || formDirty || reviewStatus !== "needs_review"}
+              className="px-3 py-2 rounded-md border border-gdf-border text-sm text-gdf-text hover:bg-gdf-surface disabled:opacity-50"
+            >
+              Reject Non-Funding
+            </button>
+            <button
+              onClick={() => runCleanup("reject-duplicates")}
+              disabled={Boolean(cleaning) || ingesting || discovering || Boolean(batchProgress) || formDirty || reviewStatus !== "needs_review"}
+              className="px-3 py-2 rounded-md border border-gdf-border text-sm text-gdf-text hover:bg-gdf-surface disabled:opacity-50"
+            >
+              Reject Duplicates
+            </button>
+          </div>
+        </div>
+        <div className="border-t border-gdf-border">
+          <div className="px-4 py-3 flex items-center justify-between gap-3">
+            <div>
+              <div className="text-xs uppercase tracking-wider text-gdf-muted font-mono">
+                Discovered candidates
+              </div>
+              <div className="mt-1 text-xs text-gdf-muted">
+                New and failed RSS results stay here until Fetch + Extract succeeds.
+              </div>
+            </div>
+            <button
+              onClick={loadPendingSources}
+              disabled={pendingSourcesLoading || Boolean(processingSourceId) || Boolean(batchProgress)}
+              className="px-3 py-1.5 rounded-md border border-gdf-border text-xs text-gdf-text hover:bg-gdf-surface disabled:opacity-50"
+            >
+              {pendingSourcesLoading ? "Loading..." : "Refresh"}
+            </button>
+            <button
+              onClick={processPendingBatch}
+              disabled={
+                pendingSources.length === 0
+                || pendingSourcesLoading
+                || Boolean(processingSourceId)
+                || Boolean(batchProgress)
+                || ingesting
+                || discovering
+                || formDirty
+              }
+              className="px-3 py-1.5 rounded-md border border-gdf-teal text-xs text-gdf-teal hover:bg-cyan-950/30 disabled:opacity-50 whitespace-nowrap"
+            >
+              {batchProgress
+                ? `Processing ${batchProgress.current}/${batchProgress.total}`
+                : `Process Next ${Math.min(3, pendingSources.length)}`}
+            </button>
+          </div>
+          {pendingSourcesLoading && pendingSources.length === 0 ? (
+            <div className="px-4 pb-4 text-sm text-gdf-muted">Loading candidates...</div>
+          ) : pendingSources.length === 0 ? (
+            <div className="px-4 pb-4 text-sm text-gdf-muted">
+              No pending candidates. Run Discover RSS to search for new funding articles.
+            </div>
+          ) : (
+            <div className="divide-y divide-gdf-border border-t border-gdf-border max-h-72 overflow-y-auto">
+              {pendingSources.map((source) => (
+                <div
+                  key={source.id}
+                  className="px-4 py-3 flex flex-col sm:flex-row sm:items-center gap-3"
+                >
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm text-gdf-text font-medium truncate">
+                      {source.title || "Untitled funding candidate"}
+                    </div>
+                    {source.status !== "pending" && (
+                      <div className="mt-1 text-[11px] text-red-300">
+                        Previous processing failed: {source.error_message || "Unknown processing error"}
+                      </div>
+                    )}
+                    <a
+                      href={source.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="mt-1 block text-xs text-gdf-teal hover:underline truncate"
+                    >
+                      {source.url}
+                    </a>
+                  </div>
+                  <button
+                    onClick={() => processPendingSource(source)}
+                    disabled={
+                      Boolean(processingSourceId)
+                      || Boolean(batchProgress)
+                      || ingesting
+                      || discovering
+                      || formDirty
+                    }
+                    className="px-3 py-2 rounded-md bg-gdf-teal text-slate-950 text-xs font-semibold hover:bg-cyan-300 disabled:opacity-50 whitespace-nowrap"
+                  >
+                    {processingSourceId === source.id ? "Processing..." : "Fetch + Extract"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </section>
+
+      <div className="grid grid-cols-1 lg:grid-cols-[minmax(280px,360px)_1fr] gap-4">
+        <section className="border border-gdf-border rounded-lg bg-gdf-bg overflow-hidden">
+          <div className="px-4 py-3 border-b border-gdf-border text-xs uppercase tracking-wider text-gdf-muted font-mono">
+            Queue
+          </div>
+          <div className="p-3 border-b border-gdf-border">
+            <div className="flex gap-2">
+              <label className="flex-1">
+                <span className="sr-only">Search draft queue</span>
+                <input
+                  value={queueSearch}
+                  onChange={(event) => changeQueueSearch(event.target.value)}
+                  placeholder="Search company, investor, sector, source"
+                  className="w-full bg-gdf-surface border border-gdf-border rounded-md px-3 py-2 text-sm text-gdf-text placeholder:text-gdf-muted focus:outline-none focus:border-gdf-teal"
+                />
+              </label>
+              {queueSearch && (
+                <button
+                  onClick={() => changeQueueSearch("")}
+                  className="px-3 py-2 rounded-md border border-gdf-border text-sm text-gdf-text hover:bg-gdf-surface"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+            <div className="mt-3 inline-flex rounded-md border border-gdf-border overflow-hidden max-w-full">
+              {REVIEW_READINESS_FILTERS.map((item) => (
+                <button
+                  key={item.value}
+                  onClick={() => changeQueueReadiness(item.value)}
+                  className={`px-2.5 py-1.5 text-xs border-r border-gdf-border last:border-r-0 whitespace-nowrap flex items-center gap-1.5 ${
+                    queueReadiness === item.value
+                      ? "bg-gdf-teal text-slate-950 font-semibold"
+                      : "text-gdf-muted hover:text-gdf-text hover:bg-gdf-surface"
+                  }`}
+                >
+                  <span>{item.label}</span>
+                  {readinessCounts && (
+                    <span className={`min-w-5 rounded-full px-1 py-0.5 text-[10px] text-center ${
+                      queueReadiness === item.value
+                        ? "bg-slate-950/15 text-slate-950"
+                        : "bg-gdf-bg text-gdf-muted border border-gdf-border"
+                    }`}>
+                      {readinessCounts[item.value] || 0}
+                    </span>
+                  )}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="divide-y divide-gdf-border max-h-[680px] overflow-y-auto">
+            {loading ? (
+              <div className="p-4 text-sm text-gdf-muted">Loading...</div>
+            ) : filteredRows.length === 0 ? (
+              <div className="p-4 text-sm text-gdf-muted">
+                {rows.length === 0
+                  ? `No ${reviewStatusLabel.toLowerCase()} drafts.`
+                  : "No drafts match the current filters."}
+              </div>
+            ) : (
+              filteredRows.map((row) => {
+                const readiness = draftReadiness(row);
+                return (
+                  <button
+                    key={row.id}
+                    onClick={() => selectDraft(row)}
+                    className={`w-full text-left px-4 py-3 transition-colors ${
+                      selected?.id === row.id ? "bg-gdf-surface" : "hover:bg-gdf-surface/70"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="text-sm font-semibold text-gdf-text truncate">
+                        {row.company_name || "Unknown company"}
+                      </span>
+                      <span className={`text-[10px] px-2 py-0.5 rounded-full border ${stageBadgeClass(row.stage)}`}>
+                        {row.stage || "Unstaged"}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-xs text-gdf-muted flex items-center justify-between gap-2">
+                      <span>{formatAmount(row.amount_usd)}</span>
+                      <span>{row.confidence_score == null ? "No score" : `${Math.round(Number(row.confidence_score) * 100)}%`}</span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-gdf-muted flex items-center gap-2">
+                      <span className="px-1.5 py-0.5 rounded border border-gdf-border bg-gdf-bg uppercase">
+                        {row.status || "draft"}
+                      </span>
+                      <span className={`px-1.5 py-0.5 rounded border ${readinessBadgeClass(readiness)}`}>
+                        {readinessLabel(readiness)}
+                      </span>
+                    </div>
+                    <div className="mt-1 text-[11px] text-gdf-muted truncate">
+                      {row.source_url || row.raw_source_id || row.id}
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+          {queueHasMore && (
+            <div className="p-3 border-t border-gdf-border">
+              <button
+                onClick={() => loadDrafts(reviewStatus, selected?.id, { append: true })}
+                disabled={loadingMore || loading}
+                className="w-full px-3 py-2 rounded-md border border-gdf-border text-sm text-gdf-text hover:bg-gdf-surface disabled:opacity-50"
+              >
+                {loadingMore ? "Loading more..." : "Load More Drafts"}
+              </button>
+            </div>
+          )}
+        </section>
+
+        <section className="border border-gdf-border rounded-lg bg-gdf-bg overflow-hidden">
+          {!selected ? (
+            <div className="p-6 text-sm text-gdf-muted">Select a draft to review.</div>
+          ) : (
+            <>
+              <div className="px-4 py-3 border-b border-gdf-border flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-semibold text-gdf-text">{selected.company_name || "Draft extraction"}</h3>
+                    {formDirty && (
+                      <span className="px-2 py-0.5 rounded-full border border-amber-900/70 bg-amber-950/30 text-[10px] uppercase tracking-wider text-amber-100">
+                        Unsaved changes
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gdf-muted break-all">{selected.source_url || "No source URL"}</p>
+                </div>
+                <label className="flex items-center gap-2 text-sm text-gdf-muted">
+                  <input
+                    type="checkbox"
+                    checked={form.is_funding_round}
+                    onChange={(e) => updateField("is_funding_round", e.target.checked)}
+                    disabled={!selectedIsEditable}
+                    className="accent-gdf-teal"
+                  />
+                  Funding round
+                </label>
+              </div>
+
+              <SourceEvidence
+                rawSource={rawSource}
+                loading={rawSourceLoading}
+                refetching={rawSourceRefetching}
+                reextracting={reextracting}
+                editable={selectedIsEditable}
+                fallbackUrl={selected.source_url}
+                onRefetch={refetchSelectedSource}
+                onReextract={reextractSelectedDraft}
+              />
+
+              <fieldset
+                disabled={!selectedIsEditable}
+                className="p-4 grid grid-cols-1 md:grid-cols-2 gap-4 disabled:opacity-70"
+              >
+                <ReviewInput label="Company" value={form.company_name} onChange={(v) => updateField("company_name", v)} />
+                <ReviewInput label="Country" value={form.country} onChange={(v) => updateField("country", v)} />
+                <ReviewInput label="Amount USD" value={form.amount_usd} onChange={(v) => updateField("amount_usd", v)} inputMode="numeric" />
+                <ReviewInput label="Original Amount" value={form.amount_original} onChange={(v) => updateField("amount_original", v)} />
+                <ReviewInput label="Original Currency" value={form.currency_original} onChange={(v) => updateField("currency_original", v)} />
+                <ReviewInput label="Stage" value={form.stage} onChange={(v) => updateField("stage", v)} />
+                <ReviewInput label="Announcement Date" value={form.announcement_date} onChange={(v) => updateField("announcement_date", v)} placeholder="YYYY-MM-DD or YYYY-MM" />
+                <ReviewInput label="Website" value={form.website} onChange={(v) => updateField("website", v)} />
+                <ReviewInput label="Sector" value={form.sector} onChange={(v) => updateField("sector", v)} />
+                <ReviewInput label="Sub-sector" value={form.sub_sector} onChange={(v) => updateField("sub_sector", v)} />
+                <ReviewInput label="Lead Investor" value={form.lead_investor} onChange={(v) => updateField("lead_investor", v)} />
+                <ReviewInput label="Confidence" value={form.confidence_score} onChange={(v) => updateField("confidence_score", v)} placeholder="0 to 1" />
+                <ReviewTextarea label="Co-investors" value={form.co_investors} onChange={(v) => updateField("co_investors", v)} />
+                <ReviewTextarea label="Extraction Notes" value={form.extraction_notes} onChange={(v) => updateField("extraction_notes", v)} />
+              </fieldset>
+
+              <div className="px-4 pb-4">
+                <div className={`rounded-md border px-4 py-3 text-sm ${
+                  canApprove
+                    ? "border-emerald-900/60 bg-emerald-950/20 text-emerald-200"
+                    : "border-amber-900/60 bg-amber-950/20 text-amber-100"
+                }`}>
+                  <div className="font-semibold mb-1">Approval checks</div>
+                  {canApprove ? (
+                    <p className="text-xs">Ready to approve into the main deals table.</p>
+                  ) : (
+                    <ul className="list-disc pl-5 space-y-1 text-xs">
+                      {approvalIssues.map((issue) => (
+                        <li key={issue}>{issue}</li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+
+              <ReviewAudit selected={selected} />
+              <ApprovalPreview preview={approvalPreview} loading={approvalPreviewLoading} />
+              <IngestionActivity logs={ingestionLogs} loading={ingestionLogsLoading} />
+
+              <div className="px-4 py-3 border-t border-gdf-border flex items-center justify-end gap-2 flex-wrap">
+                {selectedIsRejected && (
+                  <button
+                    onClick={() => runAction("reopen")}
+                    disabled={saving}
+                    className="px-3 py-2 rounded-md border border-gdf-border text-sm text-gdf-text hover:bg-gdf-surface disabled:opacity-50"
+                  >
+                    Reopen Draft
+                  </button>
+                )}
+                <button
+                  onClick={() => runAction("reject")}
+                  disabled={saving || !selectedIsEditable}
+                  className="px-3 py-2 rounded-md border border-red-900/70 text-sm text-red-200 hover:bg-red-950/40 disabled:opacity-50"
+                >
+                  Reject
+                </button>
+                <button
+                  onClick={() => runAction("save")}
+                  disabled={saving || !selectedIsEditable || !formDirty}
+                  className="px-3 py-2 rounded-md border border-gdf-border text-sm text-gdf-text hover:bg-gdf-surface disabled:opacity-50"
+                >
+                  Save Draft
+                </button>
+                <button
+                  onClick={() => runAction("approve")}
+                  disabled={saving || !selectedIsEditable || !canApprove}
+                  className="px-3 py-2 rounded-md bg-gdf-teal text-slate-950 text-sm font-semibold hover:bg-cyan-300 disabled:opacity-50"
+                >
+                  Approve to Deals
+                </button>
+              </div>
+            </>
+          )}
+        </section>
+      </div>
+    </main>
+  );
+}
+
+function ReviewInput({ label, value, onChange, placeholder, inputMode }) {
+  return (
+    <label className="block">
+      <span className="block text-xs uppercase tracking-wider text-gdf-muted font-mono mb-1">
+        {label}
+      </span>
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        inputMode={inputMode}
+        className="w-full bg-gdf-surface border border-gdf-border rounded-md px-3 py-2 text-sm text-gdf-text placeholder:text-gdf-muted focus:outline-none focus:border-gdf-teal"
+      />
+    </label>
+  );
+}
+
+function ReviewAudit({ selected }) {
+  if (!selected || selected.status === "needs_review") return null;
+
+  return (
+    <div className="px-4 pb-4">
+      <div className="rounded-md border border-gdf-border bg-gdf-surface/30 px-4 py-3">
+        <div className="text-xs uppercase tracking-wider text-gdf-muted font-mono mb-2">
+          Review audit
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+          <div>
+            <div className="text-gdf-muted">Status</div>
+            <div className="text-gdf-text font-medium">{selected.status}</div>
+          </div>
+          <div>
+            <div className="text-gdf-muted">Reviewed At</div>
+            <div className="text-gdf-text font-medium">
+              {selected.reviewed_at ? new Date(selected.reviewed_at).toLocaleString() : "Not recorded"}
+            </div>
+          </div>
+          <div>
+            <div className="text-gdf-muted">Approved Deal</div>
+            <div className="text-gdf-text font-mono break-all">
+              {selected.approved_deal_id || "None"}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ApprovalPreview({ preview, loading }) {
+  const payload = preview?.deal_payload;
+
+  return (
+    <div className="px-4 pb-4">
+      <div className="rounded-md border border-gdf-border bg-gdf-surface/30 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gdf-border flex items-center justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-gdf-muted font-mono">
+              Approval preview
+            </div>
+            <div className="mt-1 text-xs text-gdf-muted">
+              Saved draft mapping into the main deals table.
+            </div>
+          </div>
+          <div className={`text-[11px] px-2 py-1 rounded border ${
+            preview?.ready
+              ? preview.will_insert
+                ? "border-emerald-800 text-emerald-200 bg-emerald-950/30"
+                : "border-cyan-800 text-cyan-200 bg-cyan-950/30"
+              : "border-amber-800 text-amber-100 bg-amber-950/30"
+          }`}>
+            {loading
+              ? "Loading"
+              : preview?.ready
+                ? preview.will_insert ? "Will insert" : "Will match existing"
+                : "Not ready"}
+          </div>
+        </div>
+        <div className="p-4">
+          {loading ? (
+            <div className="text-xs text-gdf-muted">Loading approval preview...</div>
+          ) : !preview ? (
+            <div className="text-xs text-gdf-muted">No approval preview available.</div>
+          ) : !preview.ready ? (
+            <ul className="list-disc pl-5 space-y-1 text-xs text-amber-100">
+              {preview.errors.map((error) => (
+                <li key={error}>{error}</li>
+              ))}
+            </ul>
+          ) : (
+            <div className="space-y-4">
+              {preview.existing_deal && (
+                <div className="rounded-md border border-cyan-900/60 bg-cyan-950/20 px-3 py-2 text-xs text-cyan-100">
+                  Existing deal match: <span className="font-mono">{preview.existing_deal.deal_id}</span>
+                </div>
+              )}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                <PreviewField label="Deal ID" value={payload.deal_id} mono />
+                <PreviewField label="Company" value={payload.company_name} />
+                <PreviewField label="Country" value={payload.country} />
+                <PreviewField label="Date" value={payload.date} />
+                <PreviewField label="Stage" value={payload.stage} />
+                <PreviewField label="Amount USD" value={payload.amount_usd == null ? null : formatAmount(payload.amount_usd)} />
+                <PreviewField label="Sector" value={payload.sector} />
+                <PreviewField label="Lead Investor" value={payload.lead_investor} />
+                <PreviewField label="Co-investors" value={payload.co_investors} />
+                <PreviewField label="Website" value={payload.website} />
+                <PreviewField label="Source" value={payload.source} />
+                <PreviewField label="Notes" value={payload.notes} />
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PreviewField({ label, value, mono }) {
+  return (
+    <div>
+      <div className="text-gdf-muted">{label}</div>
+      <div className={`text-gdf-text break-words ${mono ? "font-mono" : ""}`}>
+        {value == null || value === "" ? "—" : String(value)}
+      </div>
+    </div>
+  );
+}
+
+function IngestionActivity({ logs, loading }) {
+  return (
+    <div className="px-4 pb-4">
+      <div className="rounded-md border border-gdf-border bg-gdf-surface/30 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gdf-border flex items-center justify-between">
+          <div className="text-xs uppercase tracking-wider text-gdf-muted font-mono">
+            Ingestion activity
+          </div>
+          <div className="text-[11px] text-gdf-muted">
+            {loading ? "Loading..." : `${logs.length} log${logs.length === 1 ? "" : "s"}`}
+          </div>
+        </div>
+        <div className="divide-y divide-gdf-border max-h-72 overflow-y-auto">
+          {loading ? (
+            <div className="p-4 text-xs text-gdf-muted">Loading logs...</div>
+          ) : logs.length === 0 ? (
+            <div className="p-4 text-xs text-gdf-muted">No logs recorded for this source.</div>
+          ) : (
+            logs.map((log) => (
+              <div key={log.id} className="p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm text-gdf-text font-medium">
+                      {log.event || "event"}
+                    </div>
+                    <div className="text-xs text-gdf-muted mt-1">
+                      {log.message || "No message"}
+                    </div>
+                  </div>
+                  <div className="text-right text-[11px] text-gdf-muted whitespace-nowrap">
+                    <div className="uppercase">{log.status || "unknown"}</div>
+                    <div>{log.created_at ? new Date(log.created_at).toLocaleString() : ""}</div>
+                  </div>
+                </div>
+                {log.metadata && (
+                  <details className="mt-2">
+                    <summary className="cursor-pointer text-[11px] text-gdf-teal">
+                      Metadata
+                    </summary>
+                    <pre className="mt-2 rounded-md bg-slate-950/70 border border-gdf-border p-3 text-[11px] text-gdf-muted whitespace-pre-wrap overflow-x-auto">
+                      {JSON.stringify(log.metadata, null, 2)}
+                    </pre>
+                  </details>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ConfigStatusBanner({ configStatus }) {
+  if (!configStatus) return null;
+  const missingRequired = Object.entries(configStatus.required || {})
+    .filter(([, present]) => !present)
+    .map(([name]) => name);
+  const productionChecks = configStatus.production_checks || {};
+  const missingProductionChecks = Object.entries(productionChecks)
+    .filter(([, ready]) => !ready)
+    .map(([name]) => {
+      if (name === "admin_api_key") return "ADMIN_API_KEY";
+      if (name === "cron_secret") return "CRON_SECRET";
+      if (name === "cors_restricted") return "restricted CORS_ORIGINS";
+      return name;
+    });
+  const fetchConfig = configStatus.article_fetch;
+  const fetchConfigLine = fetchConfig
+    ? `Article fetch: ${fetchConfig.timeout_seconds}s timeout, ${Math.round(fetchConfig.max_bytes / 1000000)} MB cap.`
+    : null;
+  if (configStatus.production_ready) {
+    return (
+      <div className="mb-4 border border-emerald-900/60 bg-emerald-950/20 text-emerald-200 px-4 py-3 rounded-md text-sm">
+        <div>Backend configuration is production-ready.</div>
+        {fetchConfigLine && <div className="mt-1 text-xs">{fetchConfigLine}</div>}
+      </div>
+    );
+  }
+  if (!configStatus.ok) {
+    return (
+      <div className="mb-4 border border-red-900/60 bg-red-950/30 text-red-200 px-4 py-3 rounded-md text-sm">
+        <div className="font-semibold">Backend configuration is incomplete.</div>
+        <div className="mt-1 text-xs">
+          Missing required env vars: {missingRequired.join(", ") || "unknown"}.
+        </div>
+        {fetchConfigLine && <div className="mt-1 text-xs">{fetchConfigLine}</div>}
+      </div>
+    );
+  }
+  return (
+    <div className="mb-4 border border-amber-900/60 bg-amber-950/20 text-amber-100 px-4 py-3 rounded-md text-sm">
+      <div>Backend credentials are present, but production hardening is incomplete.</div>
+      <div className="mt-1 text-xs">
+        Missing: {missingProductionChecks.join(", ") || "unknown"}.
+      </div>
+      {fetchConfigLine && <div className="mt-1 text-xs">{fetchConfigLine}</div>}
+    </div>
+  );
+}
+
+function DbStatusBanner({ dbStatus }) {
+  if (!dbStatus) return null;
+  const audit = dbStatus.migrations?.["009_review_audit"];
+  if (dbStatus.database_reachable === false) {
+    return (
+      <div className="mb-4 border border-red-900/60 bg-red-950/30 text-red-200 px-4 py-3 rounded-md text-sm">
+        Database could not be reached, so migration 009 could not be verified.
+      </div>
+    );
+  }
+  if (audit?.applied) {
+    return (
+      <div className="mb-4 border border-emerald-900/60 bg-emerald-950/20 text-emerald-200 px-4 py-3 rounded-md text-sm">
+        Review audit storage is enabled.
+      </div>
+    );
+  }
+  return (
+    <div className="mb-4 border border-amber-900/60 bg-amber-950/20 text-amber-100 px-4 py-3 rounded-md text-sm">
+      <div>
+        Migration 009 is pending. Approval and rejection still work, but reviewed timestamps and approved deal IDs will not be stored until it is applied.
+      </div>
+      <details className="mt-3">
+        <summary className="cursor-pointer text-xs font-semibold text-amber-50">
+          Show migration SQL
+        </summary>
+        <pre className="mt-2 max-h-56 overflow-auto rounded-md border border-amber-900/50 bg-slate-950/70 p-3 text-[11px] leading-relaxed text-amber-50 whitespace-pre-wrap">
+          {MIGRATION_009_SQL}
+        </pre>
+      </details>
+    </div>
+  );
+}
+
+function SourceEvidence({
+  rawSource,
+  loading,
+  refetching,
+  reextracting,
+  editable,
+  fallbackUrl,
+  onRefetch,
+  onReextract,
+}) {
+  const rawText = rawSource?.raw_text || rawSource?.extracted_text || "";
+  const preview = rawText.length > 1200 ? `${rawText.slice(0, 1200)}...` : rawText;
+  const sourceUrl = rawSource?.url || fallbackUrl;
+
+  return (
+    <div className="px-4 pt-4">
+      <div className="rounded-md border border-gdf-border bg-gdf-surface/40 overflow-hidden">
+        <div className="px-4 py-3 border-b border-gdf-border flex items-start justify-between gap-3">
+          <div>
+            <div className="text-xs uppercase tracking-wider text-gdf-muted font-mono">
+              Source evidence
+            </div>
+            <div className="mt-1 text-sm font-semibold text-gdf-text">
+              {loading ? "Loading source..." : rawSource?.title || "Untitled source"}
+            </div>
+          </div>
+          <div className="flex items-start gap-3">
+            <div className="text-right text-[11px] text-gdf-muted">
+              <div>{rawSource?.domain || rawSource?.source_name || "Source"}</div>
+              <div>{rawSource?.status || ""}</div>
+              <div>{rawText ? `${rawText.length} chars` : ""}</div>
+            </div>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <button
+                onClick={onRefetch}
+                disabled={!editable || loading || refetching || reextracting || !rawSource?.id}
+                className="px-2.5 py-1.5 rounded-md border border-gdf-border text-[11px] text-gdf-text hover:bg-gdf-bg disabled:opacity-50 whitespace-nowrap"
+              >
+                {refetching ? "Refetching..." : "Refetch Text"}
+              </button>
+              <button
+                onClick={onReextract}
+                disabled={!editable || loading || refetching || reextracting || !rawText}
+                className="px-2.5 py-1.5 rounded-md border border-gdf-border text-[11px] text-gdf-text hover:bg-gdf-bg disabled:opacity-50 whitespace-nowrap"
+              >
+                {reextracting ? "Re-extracting..." : "Re-extract Draft"}
+              </button>
+            </div>
+          </div>
+        </div>
+        <div className="p-4 space-y-3">
+          {sourceUrl && (
+            <a
+              href={sourceUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="block text-xs text-gdf-teal hover:underline break-all"
+            >
+              {sourceUrl}
+            </a>
+          )}
+          <p className="text-xs text-gdf-muted leading-relaxed whitespace-pre-line max-h-44 overflow-y-auto">
+            {loading
+              ? "Loading article text..."
+              : preview || "No source text available for this draft."}
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReviewTextarea({ label, value, onChange }) {
+  return (
+    <label className="block">
+      <span className="block text-xs uppercase tracking-wider text-gdf-muted font-mono mb-1">
+        {label}
+      </span>
+      <textarea
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        rows={4}
+        className="w-full bg-gdf-surface border border-gdf-border rounded-md px-3 py-2 text-sm text-gdf-text placeholder:text-gdf-muted focus:outline-none focus:border-gdf-teal resize-y"
+      />
+    </label>
+  );
+}
+
 export default function App() {
   const [tab, setTab] = useState("explorer");
   const [filters, setFilters] = useState({
@@ -2620,6 +4266,12 @@ export default function App() {
   const [error, setError] = useState(null);
   const [expandedId, setExpandedId] = useState(null);
   const [companyModalName, setCompanyModalName] = useState(null);
+
+  useEffect(() => {
+    if (!ADMIN_UI_ENABLED && tab === "review") {
+      setTab("explorer");
+    }
+  }, [tab]);
 
   // 300 ms debounce: settle on the search term before hitting the API.
   useEffect(() => {
@@ -2769,7 +4421,7 @@ export default function App() {
   return (
     <div className="min-h-full flex flex-col overflow-x-clip">
       <Header />
-      <Nav tab={tab} setTab={setTab} />
+      <Nav tab={tab} setTab={setTab} adminUiEnabled={ADMIN_UI_ENABLED} />
       <StatsBar stats={stats} />
 
       {tab === "explorer" && (
@@ -2836,6 +4488,10 @@ export default function App() {
 
       {tab === "investors" && (
         <InvestorDirectory onViewDeals={viewDealsForInvestor} />
+      )}
+
+      {ADMIN_UI_ENABLED && tab === "review" && (
+        <ReviewQueue />
       )}
 
       {tab === "about" && (

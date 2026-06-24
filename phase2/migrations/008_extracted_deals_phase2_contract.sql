@@ -8,6 +8,7 @@ create extension if not exists pgcrypto;
 create table if not exists public.extracted_deals (
     id                 uuid primary key default gen_random_uuid(),
     raw_source_id      uuid references public.raw_sources(id) on delete cascade,
+    source_url         text,
     company_name       text,
     country            text,
     amount_usd         bigint,
@@ -31,6 +32,7 @@ create table if not exists public.extracted_deals (
 alter table public.extracted_deals
     add column if not exists raw_source_id uuid
         references public.raw_sources(id) on delete cascade,
+    add column if not exists source_url text,
     add column if not exists company_name text,
     add column if not exists country text,
     add column if not exists amount_usd bigint,
